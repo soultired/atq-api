@@ -1,6 +1,7 @@
 import os
 import random
 import time
+import threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from core import (
@@ -24,6 +25,10 @@ CACHE_TTL = 600
 cached_build_number = None
 last_fetched_time = 0
 
+active_sessions = {}
+session_lock = threading.Lock()
+MAX_SESSIONS = 5
+
 def get_build_number():
     global cached_build_number, last_fetched_time
     current_time = time.time()
@@ -41,6 +46,15 @@ def get_build_number():
 def index():
     return jsonify({"status": "API is running", "service": "Discord Quest API"}), 200
 
+@app.route("/api/sessions/status", methods=["GET"])
+def sessions_status():
+    with session_lock:
+        return jsonify({
+            "active": len(active_sessions),
+            "max": MAX_SESSIONS,
+            "available": MAX_SESSIONS - len(active_sessions)
+        })
+
 @app.route("/api/quest/init", methods=["POST"])
 def init_quest():
     try:
@@ -48,6 +62,13 @@ def init_quest():
         token = data.get("token")
         if not token:
             return jsonify({"error": "Token is required", "status": "error"}), 400
+
+        with session_lock:
+            if len(active_sessions) >= MAX_SESSIONS and token not in active_sessions:
+                return jsonify({
+                    "error": f"Đã đạt giới hạn {MAX_SESSIONS} user. Vui lòng đợi slot trống.",
+                    "status": "limit_reached"
+                }), 429
 
         build_number = get_build_number()
         api = DiscordAPI(token, build_number, lambda msg, level: None)
@@ -98,11 +119,19 @@ def init_quest():
                 "done": q_done,
                 "completed": q_completed
             })
+
+        with session_lock:
+            active_sessions[token] = {
+                "started_at": time.time(),
+                "quest_id": active_quest_data["id"] if active_quest_data else None,
+                "quest_name": active_quest_data["name"] if active_quest_data else None
+            }
             
         return jsonify({
             "status": "active" if active_quest_data else "no_quests",
             "quest": active_quest_data,
-            "quests": quest_list
+            "quests": quest_list,
+            "session_count": len(active_sessions)
         })
     except Exception as e:
         return jsonify({"error": str(e), "status": "error"}), 500
@@ -124,6 +153,11 @@ def progress_video():
         
         res = completer.send_video_progress(qid, timestamp)
         completed = bool(res.get("completed_at"))
+
+        if completed:
+            with session_lock:
+                if token in active_sessions:
+                    del active_sessions[token]
         
         return jsonify({
             "status": "ok",
@@ -155,12 +189,33 @@ def progress_heartbeat():
         pd = res.get("progress", {})
         if pd and task_type in pd:
             new_done = pd[task_type].get("value", -1)
+
+        if completed:
+            with session_lock:
+                if token in active_sessions:
+                    del active_sessions[token]
             
         return jsonify({
             "status": "ok",
             "completed": completed,
             "done": new_done
         })
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "error"}), 500
+
+@app.route("/api/sessions/stop", methods=["POST"])
+def stop_session():
+    try:
+        data = request.json or {}
+        token = data.get("token")
+        if not token:
+            return jsonify({"error": "Token is required"}), 400
+            
+        with session_lock:
+            if token in active_sessions:
+                del active_sessions[token]
+                
+        return jsonify({"status": "ok", "message": "Session stopped"})
     except Exception as e:
         return jsonify({"error": str(e), "status": "error"}), 500
 
