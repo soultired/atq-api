@@ -1,7 +1,8 @@
 services:
   - type: web
     name: discord-quest-completer
+    runtime: python
     plan: free
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT"
